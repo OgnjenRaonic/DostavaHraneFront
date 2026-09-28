@@ -1,0 +1,303 @@
+<section class="board-toolbar">
+  <button type="button" class="button primary" (click)="openNewOrder()">+ Nova porudzbina</button>
+  <div class="toolbar-stats">
+    <span><strong>{{ board()?.unassigned?.length ?? 0 }}</strong> ceka vozaca</span>
+    <span><strong>{{ onShiftCount() }}</strong> vozaca u smeni</span>
+    @if ((board()?.problems?.length ?? 0) > 0) {
+      <span class="text-danger"><strong>{{ board()!.problems.length }}</strong> problem</span>
+    }
+  </div>
+  <div class="toolbar-right">
+    @if (hiddenDriverCount() > 0 || showIdleDrivers()) {
+      <label class="check">
+        <input type="checkbox" [checked]="showIdleDrivers()" (change)="showIdleDrivers.set(!showIdleDrivers())" />
+        Prikazi i vozace van smene ({{ hiddenDriverCount() || 'svi' }})
+      </label>
+    }
+    <button type="button" class="button ghost small" (click)="reload()">Osvezi</button>
+  </div>
+</section>
+
+@if (!board()) {
+  <p class="empty">Ucitavanje table...</p>
+} @else {
+  <div class="board" cdkDropListGroup>
+    <!-- ======================================================= nedodeljene + problemi -->
+    <section class="column queue">
+      @if (board()!.problems.length > 0) {
+        <h2 class="column-title danger">Problemi</h2>
+        @for (order of board()!.problems; track order.id) {
+          <article class="card problem">
+            <div class="card-head">
+              <strong>#{{ order.id }} {{ order.restaurantName }}</strong>
+              <span class="muted">{{ order.driverName }}</span>
+            </div>
+            <p>{{ order.deliveryAddress }}</p>
+            <p class="problem-note">"{{ order.problemNote }}"</p>
+            <div class="card-actions">
+              <button type="button" class="button small secondary" (click)="reopen(order)">Vrati u red</button>
+              <button type="button" class="button small ghost" (click)="cancel(order)">Otkazi</button>
+            </div>
+          </article>
+        }
+      }
+
+      <h2 class="column-title">Ceka vozaca</h2>
+      <div
+        class="drop-zone"
+        cdkDropList
+        id="unassigned"
+        (cdkDropListDropped)="dropOnUnassigned($event)"
+      >
+        @for (order of board()!.unassigned; track order.id) {
+          <article
+            class="card order"
+            [class.warn]="isWaitingLong(order)"
+            cdkDrag
+            [cdkDragData]="orderItem(order)"
+            (cdkDragStarted)="dragStarted()"
+            (cdkDragEnded)="dragEnded()"
+          >
+            <div class="card-head">
+              <strong>#{{ order.id }} {{ order.restaurantName }}</strong>
+              <span class="badge" [class.badge-warn]="isWaitingLong(order)">{{ waitingMinutes(order) }} min</span>
+            </div>
+            <p class="address">{{ order.deliveryAddress }}</p>
+            <p class="meta">
+              <span [class.text-danger]="isFoodWaiting(order)">{{ readyText(order) }}</span>
+              @if (order.amountToCollect > 0) {
+                <span>· {{ money(order.amountToCollect) }} {{ paymentLabels[order.paymentMethod] }}</span>
+              }
+              @if (order.deliveryLatitude == null) {
+                <span class="text-warn">· bez koordinata</span>
+              }
+            </p>
+            <div class="card-actions">
+              <button type="button" class="button small primary" (click)="openSuggestions(order)">Predlog vozaca</button>
+              <button type="button" class="button small ghost" (click)="editOrder(order)">Izmeni</button>
+              <button type="button" class="button small ghost" (click)="cancel(order)">Otkazi</button>
+            </div>
+          </article>
+        } @empty {
+          <p class="empty small">Nema porudzbina koje cekaju. Prevuci stanicu ovde da je skines sa vozaca.</p>
+        }
+      </div>
+    </section>
+
+    <!-- ======================================================= vozaci -->
+    <div class="drivers">
+      @for (driver of visibleDrivers(); track driver.driverId) {
+        <section class="column driver" [class.off-shift]="!driver.onShift">
+          <header class="driver-head">
+            <div class="driver-name">
+              <span class="dot" [class.on]="driver.onShift"></span>
+              <strong>{{ driver.driverName }}</strong>
+              @if (driver.driverPhone) {
+                <a class="muted small-text" [href]="'tel:' + driver.driverPhone">{{ driver.driverPhone }}</a>
+              }
+            </div>
+            <div class="driver-stats">
+              <span title="Porudzbine u torbi">torba {{ driver.ordersOnBoard }}</span>
+              <span title="Porudzbine koje treba preuzeti">preuzeti {{ driver.ordersToPickUp }}</span>
+              @if (driver.estimatedFinishAt) {
+                <span>kraj ~{{ time(driver.estimatedFinishAt) }} · {{ driver.totalKm }} km</span>
+              }
+            </div>
+            <div class="driver-flags">
+              @if (!driver.locationFresh) {
+                <span class="flag">lokacija nepoznata</span>
+              }
+              @if (driver.unacknowledgedCount > 0) {
+                <span class="flag warn">{{ driver.unacknowledgedCount }} nije potvrdio</span>
+              }
+              @if (driver.overCapacity) {
+                <span class="flag danger">preko kapaciteta ({{ driver.maxOnBoard }})</span>
+              }
+            </div>
+            <div class="card-actions">
+              <button type="button" class="button small secondary" (click)="openOptimization(driver)"
+                [disabled]="driver.stops.length < 2">Predlog redosleda</button>
+              <button type="button" class="button small ghost" (click)="toggleShift(driver)">
+                {{ driver.onShift ? 'Zavrsi smenu' : 'U smenu' }}
+              </button>
+            </div>
+          </header>
+
+          <div
+            class="drop-zone stops"
+            cdkDropList
+            [id]="listId(driver.driverId)"
+            (cdkDropListDropped)="dropOnDriver($event, driver)"
+          >
+            @for (stop of driver.stops; track stop.orderId + stop.kind; let index = $index; let first = $first) {
+              <article
+                class="card stop"
+                [class.pickup]="stop.kind === 'PICKUP'"
+                [class.dropoff]="stop.kind === 'DROPOFF'"
+                [class.next]="first"
+                cdkDrag
+                [cdkDragData]="stopItem(stop, driver.driverId)"
+                (cdkDragStarted)="dragStarted()"
+                (cdkDragEnded)="dragEnded()"
+              >
+                <div class="card-head">
+                  <span class="kind">{{ stop.kind === 'PICKUP' ? 'PREUZMI' : 'PREDAJ' }} #{{ stop.orderId }}</span>
+                  <span class="eta" title="Procena dolaska">~{{ time(stop.etaAt) }}</span>
+                </div>
+                @if (stop.kind === 'PICKUP') {
+                  <p><strong>{{ stop.order.restaurantName }}</strong>
+                    @if (stop.order.restaurantOrderRef) { <span class="muted ref">br. {{ stop.order.restaurantOrderRef }}</span> }
+                  </p>
+                  <p class="meta">
+                    gotovo {{ time(stop.order.readyAt) }}
+                    @if (stop.waitMinutes >= 1) { <span>· ceka {{ round(stop.waitMinutes) }} min</span> }
+                    @if (isLatePickup(stop)) { <span class="text-danger">· hrana ceka</span> }
+                  </p>
+                  @if (stop.order.status === 'ASSIGNED' && !stop.order.acknowledgedAt) {
+                    <span class="flag warn">nije potvrdio</span>
+                  }
+                } @else {
+                  <p class="address">{{ stop.order.deliveryAddress }}</p>
+                  <p class="meta">
+                    {{ stop.order.customerName || stop.order.customerPhone }}
+                    @if (stop.order.amountToCollect > 0) {
+                      <span>· {{ money(stop.order.amountToCollect) }} {{ paymentLabels[stop.order.paymentMethod] }}</span>
+                    }
+                  </p>
+                  @if (stop.order.status === 'PICKED_UP') {
+                    <span class="flag ok">kod vozaca</span>
+                  }
+                }
+                <div class="stop-tools">
+                  <button type="button" class="icon" title="Gore" (click)="moveStop(driver, index, -1)" [disabled]="first">&#9650;</button>
+                  <button type="button" class="icon" title="Dole" (click)="moveStop(driver, index, 1)"
+                    [disabled]="index === driver.stops.length - 1">&#9660;</button>
+                  @if (stop.order.status === 'ASSIGNED') {
+                    <button type="button" class="icon" title="Skini sa vozaca" (click)="unassign(stop.order)">&#10005;</button>
+                  }
+                  <button type="button" class="icon" title="Izmeni porudzbinu" (click)="editOrder(stop.order)">&#9998;</button>
+                </div>
+              </article>
+            } @empty {
+              <p class="empty small">Prazna ruta. Prevuci porudzbinu ovde.</p>
+            }
+          </div>
+        </section>
+      } @empty {
+        <p class="empty">Nijedan vozac nije u smeni. Ukljuci prikaz vozaca van smene ili ih dodaj u "Vozaci".</p>
+      }
+    </div>
+  </div>
+}
+
+<!-- ======================================================= predlog vozaca -->
+@if (suggestionOrder(); as order) {
+  <div class="modal-backdrop" (click)="closeSuggestions()">
+    <section class="modal wide" role="dialog" aria-modal="true" (click)="$event.stopPropagation()">
+      <header class="modal-header">
+        <div>
+          <h2>Predlog vozaca za #{{ order.id }}</h2>
+          <p class="muted">{{ order.restaurantName }} &rarr; {{ order.deliveryAddress }}</p>
+        </div>
+        <button type="button" class="link" (click)="closeSuggestions()">zatvori</button>
+      </header>
+      @if (!suggestions()) {
+        <p class="empty">Racunam...</p>
+      } @else {
+        <p class="muted small-text">
+          Rangirano po ukupnom kasnjenju: kad nova predaja stize i koliko bi zakasnile porudzbine koje vozac vec ima.
+          Nista se ne menja dok ne kliknes "Dodeli".
+        </p>
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Vozac</th>
+              <th>Preuzimanje</th>
+              <th>Predaja</th>
+              <th>Ruta duza</th>
+              <th>Ostali kasne</th>
+              <th>Sada</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            @for (suggestion of suggestions()!; track suggestion.driverId; let first = $first) {
+              <tr [class.best]="first && suggestion.onShift">
+                <td>
+                  <strong>{{ suggestion.driverName }}</strong>
+                  @if (!suggestion.onShift) { <span class="flag">van smene</span> }
+                  @if (!suggestion.locationKnown) { <span class="flag">bez lokacije</span> }
+                  @if (!suggestion.withinCapacity) { <span class="flag danger">preko kapaciteta</span> }
+                  @if (suggestion.currentDriver) { <span class="flag ok">trenutni</span> }
+                </td>
+                <td>~{{ time(suggestion.pickupEtaAt) }}</td>
+                <td><strong>~{{ time(suggestion.deliveryEtaAt) }}</strong></td>
+                <td>+{{ round(suggestion.extraMinutes) }} min</td>
+                <td [class.text-warn]="suggestion.othersDelayMinutes >= 5">
+                  {{ suggestion.othersDelayMinutes > 0 ? '+' + round(suggestion.othersDelayMinutes) + ' min' : '-' }}
+                </td>
+                <td>{{ suggestion.stopCount }} stanica · torba {{ suggestion.ordersOnBoard }}</td>
+                <td class="actions">
+                  <button type="button" class="button small primary" (click)="applySuggestion(suggestion)">Dodeli</button>
+                  <button type="button" class="button small ghost" (click)="appendTo(suggestion)" title="Preuzimanje i predaja na kraj rute">Na kraj</button>
+                </td>
+              </tr>
+            }
+          </tbody>
+        </table>
+      }
+    </section>
+  </div>
+}
+
+<!-- ======================================================= predlog redosleda -->
+@if (optimizationDriver(); as driver) {
+  <div class="modal-backdrop" (click)="closeOptimization()">
+    <section class="modal" role="dialog" aria-modal="true" (click)="$event.stopPropagation()">
+      <header class="modal-header">
+        <h2>Predlog redosleda: {{ driver.driverName }}</h2>
+        <button type="button" class="link" (click)="closeOptimization()">zatvori</button>
+      </header>
+      @if (optimization(); as result) {
+        @if (!result.changed) {
+          <p class="alert notice">Trenutni redosled je vec najbolji koji planer nalazi.</p>
+        } @else {
+          <div class="compare">
+            <div>
+              <span class="muted">Sada</span>
+              <strong>kraj ~{{ time(result.currentFinishAt) }}</strong>
+              <span>{{ result.currentKm }} km</span>
+            </div>
+            <div class="better">
+              <span class="muted">Predlog</span>
+              <strong>kraj ~{{ time(result.suggestedFinishAt) }}</strong>
+              <span>{{ result.suggestedKm }} km</span>
+            </div>
+          </div>
+          <p class="muted small-text">Dostave ukupno ranije za {{ result.deliveryMinutesSaved }} min.</p>
+          <ol class="ref-list">
+            @for (ref of result.stops; track ref.orderId + ref.kind) {
+              <li [class.pickup]="ref.kind === 'PICKUP'">{{ describeRef(ref) }}</li>
+            }
+          </ol>
+          <footer class="modal-actions">
+            <button type="button" class="button ghost" (click)="closeOptimization()">Ostavi kako je</button>
+            <button type="button" class="button primary" (click)="applyOptimization()">Primeni redosled</button>
+          </footer>
+        }
+      } @else {
+        <p class="empty">Racunam...</p>
+      }
+    </section>
+  </div>
+}
+
+@if (formOrder()) {
+  <app-order-form
+    [order]="formOrderValue()"
+    [restaurants]="restaurants()"
+    [drivers]="board()?.drivers ?? []"
+    (saved)="orderSaved($event)"
+    (closed)="formOrder.set(null)"
+  />
+}
